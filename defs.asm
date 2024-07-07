@@ -26,6 +26,9 @@
 %define SYS_SETSOCKOPT 54
 %define SYS_WAIT4 61
 %define SYS_SOCKET 41
+%define SYS_STAT 4
+%define SYS_CHDIR 80
+%define SYS_GETCWD 79
 
 ;;
 %define PROT_READ 1

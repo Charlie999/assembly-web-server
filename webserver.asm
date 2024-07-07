@@ -24,6 +24,8 @@ page_name: dq 0
 webroot: dq 0
 mime_type: dq 0
 reap_status: dq 0
+index_addl: dq blank_str
+cur_wd: dq 0
 
 section .rodata
 ; constants
@@ -54,7 +56,7 @@ msg_500_end:
 %define msg_500_len (msg_500_end - msg_500) 
 
 hdr_fmt: db "HTTP/1.1 200 OK",0xd,0xa,"Connection: close",0xd,0xa,"Content-Type: %s",0xd,0xa,"Server: ",SERVER_BRAND,0xd,0xa,"Content-Length: %lu",0xd,0xa,0xd,0xa,0
-page_name_fmt: db "%s%s",0
+page_name_fmt: db "./%s%s",0
 
 ; hardcoded! yay!
 mime_html: db "text/html",0
@@ -75,6 +77,8 @@ extn_png: db "png",0
 extn_ico: db "ico",0
 
 index_path: db "/index.html",0
+blank_str: db 0
+double_dot: db '..',0
 
 section .text
 global _start
@@ -375,6 +379,17 @@ ret
 ;;
 serv_child:
 
+;; chdir(webroot)
+mov rax, SYS_CHDIR
+mov qword rdi, [webroot]
+syscall
+cmp rax, 0
+jge .initial_chdir_ok
+mov rdi, rax
+mov rax, SYS_EXIT
+syscall
+.initial_chdir_ok:
+
 ;; tcp_buf = mmap(NULL, TCP_BUF_SZ, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0)
 mov rdi, NULL
 mov rsi, TCP_BUF_SZ
@@ -385,6 +400,29 @@ mov r9,  0
 mov rax, SYS_MMAP
 syscall
 mov qword [tcp_buf], rax
+cmp rax, 0
+jge .mmap_first_ok
+mov rdi, rax
+mov rax, SYS_EXIT
+syscall
+.mmap_first_ok:
+
+;; cur_wd = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0)
+mov rdi, NULL
+mov rsi, 4096
+mov rdx, (PROT_READ | PROT_WRITE)
+mov r10, (MAP_ANONYMOUS | MAP_PRIVATE)
+mov r8 , -1
+mov r9,  0
+mov rax, SYS_MMAP
+syscall
+mov qword [cur_wd], rax
+cmp rax, 0
+jge .mmap_second_ok
+mov rdi, rax
+mov rax, SYS_EXIT
+syscall
+.mmap_second_ok:
 
 ;.loop:
 ;; read(cli_fd, tcp_buf, TCP_BUF_SZ)
@@ -425,29 +463,60 @@ mov qword rdi, [tcp_buf]
 lea rdi, [rdi + 4]
 call populate_mime
 
+;; getcwd - in prep for next step
+mov rax, SYS_GETCWD
+mov qword rdi, [cur_wd]
+mov rsi, 4095
+syscall
+cmp rax, 0
+jne .cwd_ok
+mov rdi, rax
+mov rax, SYS_EXIT
+syscall
+.cwd_ok:
 
-;; printf(access)
+.open_page:
+
+;; asprintf(page_name, "./%s%s", access, index_addl)
 mov qword rdi, [tcp_buf]
-lea rsi, [rdi + 4]
-mov rdi, access_log
-mov rbp, rsi
-call printf
-
-; check if /
-mov qword rdi, [tcp_buf]
-cmp word [rdi + 4], 0x002F
-jne .not_index
-mov rbp, index_path
-.not_index:
-
-;; asprintf(fname, "%s%s", webroot, access)
+lea rdx, [rdi + 4]
 mov rdi, page_name
 mov rsi, page_name_fmt
-mov qword rdx, [webroot]
-mov rcx, rbp
+mov qword rcx, [index_addl]
 call asprintf
 cmp rax, 0
 jle .500
+
+;; chdir - used to check if access path is a directory
+mov rax, SYS_CHDIR
+mov qword rdi, [page_name]
+syscall
+cmp rax, 0
+jne .not_dir
+
+mov rax, SYS_CHDIR
+mov qword rdi, [cur_wd]
+syscall
+cmp rax, 0
+jge .chdir_inner_ok
+mov rdi, rax
+mov rax, SYS_EXIT
+syscall
+.chdir_inner_ok:
+
+mov rax, index_path
+mov qword [index_addl], rax
+
+mov qword rdi, [page_name]
+call free
+
+jmp .open_page
+.not_dir:
+
+;; printf(access)
+mov rdi, access_log
+mov qword rsi, [page_name]
+call printf
 
 ;; page_fd = open(fname, O_RDONLY, 0)
 mov rax, SYS_OPEN
@@ -488,6 +557,12 @@ mov r9,  0
 mov rax, SYS_MMAP
 syscall
 mov qword [page_buf], rax
+cmp rax, 0
+jge .mmap_third_ok
+mov rdi, rax
+mov rax, SYS_EXIT
+syscall
+.mmap_third_ok:
 
 ;; read(page_fd, page_buf, page_len)
 mov rax, SYS_READ
@@ -496,7 +571,7 @@ mov qword rsi, [page_buf]
 mov qword rdx, [page_len]
 syscall
 cmp qword rax, [page_len]
-jne .500
+jne .404
 
 ;; hdr_len = asprintf(&hdr_buf, hdr_fmt, mime_type, page_len)
 mov qword rdi, hdr_buf
@@ -547,6 +622,12 @@ syscall
 ;; munmap(tcp_buf, length)
 mov qword rdi, [tcp_buf]
 mov rsi, TCP_BUF_SZ
+mov rax, SYS_MUNMAP
+syscall
+
+;; munmap(cur_wd, length)
+mov qword rdi, [cur_wd]
+mov rsi, 4096
 mov rax, SYS_MUNMAP
 syscall
 
@@ -620,6 +701,18 @@ mov rax, 1
 ret
 .no_percent:
 
+cmp byte [rdi], 0x20
+jge .lower_bound_ok
+mov rax, 1
+ret
+.lower_bound_ok:
+
+cmp byte [rdi], 0x7D
+jle .upper_bound_ok
+mov rax, 1
+ret
+.upper_bound_ok:
+
 inc rdi
 cmp byte [rdi], 0
 jne .loop
@@ -637,14 +730,6 @@ repne scasb
 dec rdi ; rdi is now end char
 mov rcx, rdi
 sub rcx, rbp ; string length!
-cmp rcx, 1 ; do / (index.html) check
-jne .not_index
-cmp byte [rbp], '/'
-jne .not_index
-mov rax, mime_html
-mov qword [mime_type], rax
-ret
-.not_index:
 mov al, '.'
 mov rdi, rbp
 repne scasb
@@ -652,7 +737,6 @@ cmp rcx, 0
 jne .extn_found
 mov rax, mime_plain
 mov qword [mime_type], rax
-mov byte [rdi - 1], '.'
 ret
 .extn_found:
 mov byte [rdi - 1], 0 ; remove dot, rdi is now extension!
