@@ -196,10 +196,7 @@ syscall
 
 cmp rax, 0
 jge .no_setsockopt_reuseaddr_fail
-push rax
-mov rdi, perr_sockopt_msg
-call perror
-pop rdi
+mov rdi, rax
 mov rax, SYS_EXIT
 syscall
 ret
@@ -216,10 +213,7 @@ syscall
 
 cmp rax, 0
 jge .no_setsockopt_reuseport_fail
-push rax
-mov rdi, perr_sockopt_msg
-call perror
-pop rdi
+mov rdi, rax
 mov rax, SYS_EXIT
 syscall
 ret
