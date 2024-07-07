@@ -1,7 +1,7 @@
 BITS 64
 ; TODO: use syscalls instead of libc functions for network stuff completely
 %include "defs.asm"
-%define SERVER_BRAND "that-is-a-secret"
+%define SERVER_BRAND "assembly-webserver"
 ;args rdi, rsi, rdx, rcx, r8, r9
 ;scrh rax, rdi, rsi, rdx, rcx, r8, r9, r10, r11
 section .data ; none of this is really aligned, but I'm on holiday and I do not care!
