@@ -9,6 +9,7 @@
 
 %define SO_REUSEADDR 2
 %define SO_REUSEPORT 15
+%define SO_RCVTIMEO_NEW 66
 
 ;;
 %define SYS_BIND 49
@@ -29,6 +30,12 @@
 %define SYS_STAT 4
 %define SYS_CHDIR 80
 %define SYS_GETCWD 79
+%define SYS_RT_SIGACTION 13
+%define SYS_RT_SIGRETURN 15
+%define SYS_KILL 62
+%define SYS_GETPID 39
+%define SYS_GETPGID 121
+%define SYS_MPROTECT 10
 
 ;;
 %define PROT_READ 1
@@ -36,13 +43,24 @@
 
 %define MAP_ANONYMOUS 0x20
 %define MAP_PRIVATE 0x02
+%define MAP_SHARED 0x01
 
 ;;
 %define O_RDONLY 0
 
 ;;
+%define SIGINT 2
 %define SIGTRAP 5
+%define SIGCHLD 17
+
+%define WNOHANG 1
+
+%define SA_RESTORER 0x04000000
+%define SA_RESTART  0x10000000
 
 ;;
 %define SEEK_SET 0
 %define SEEK_END 2
+
+;;
+%define EAGAIN 11

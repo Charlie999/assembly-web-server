@@ -22,6 +22,7 @@ hdr_len: dq 0
 hdr_buf: dq 0
 page_name: dq 0
 webroot: dq 0
+webroot_len: dq 0
 mime_type: dq 0
 reap_status: dq 0
 index_addl: dq blank_str
@@ -42,6 +43,7 @@ inval_port: db "invalid port %lu",0xa,0
 access_log: db "access [%s]",0xa,0
 rsp_debug: db "rsp = 0x%016lX",0xa,0
 int32_one: dd 1
+sigint_msg: db "SIGINT caught, exiting",0xa,0
 
 msg_bad_req: db "HTTP/1.1 400 Bad request",0xd,0xa,"Connection: close",0xd,0xa,"Content-Type: text/plain",0xd,0xa,"Server: ",SERVER_BRAND,0xd,0xa,"Content-Length: 12",0xd,0xa,0xd,0xa,"Bad request",0xa
 msg_bad_req_end:
@@ -50,6 +52,10 @@ msg_bad_req_end:
 msg_404: db "HTTP/1.1 404 Not Found",0xd,0xa,"Connection: close",0xd,0xa,"Content-Type: text/plain",0xd,0xa,"Server: ",SERVER_BRAND,0xd,0xa,"Content-Length: 10",0xd,0xa,0xd,0xa,"Not Found",0xa
 msg_404_end:
 %define msg_404_len (msg_404_end - msg_404) 
+
+msg_408: db "HTTP/1.1 408 Request Timeout",0xd,0xa,"Connection: close",0xd,0xa,"Content-Type: text/plain",0xd,0xa,"Server: ",SERVER_BRAND,0xd,0xa,0xd,0xa,"Request Timed Out",0xa
+msg_408_end:
+%define msg_408_len (msg_408_end - msg_408) 
 
 msg_500: db "HTTP/1.1 500 Internal Server Error",0xd,0xa,"Connection: close",0xd,0xa,"Content-Type: text/plain",0xd,0xa,"Server: ",SERVER_BRAND,0xd,0xa,"Content-Length: 22",0xd,0xa,0xd,0xa,"Internal Server Error",0xa
 msg_500_end:
@@ -80,6 +86,30 @@ index_path: db "/index.html",0
 blank_str: db 0
 double_dot: db '..',0
 
+rcvtimeo_timeval: dq 10 ; tv_sec
+                  dq 0  ; tv_usec
+
+sigaction_sigint:
+dq sigint_hdlr ; sa_handler
+dq (SA_RESTORER | SA_RESTART) ; sa_flags
+dq sig_restorer ; sa_restorer
+dq 0 ; sa_mask
+
+sigaction_sigint_child:
+dq sigint_child_hdlr ; sa_handler
+dq (SA_RESTORER | SA_RESTART) ; sa_flags
+dq sig_restorer ; sa_restorer
+dq 0 ; sa_mask
+
+sigaction_sigchld:
+dq sigchld_hdlr ; sa_handler
+dq (SA_RESTORER | SA_RESTART) ; sa_flags
+dq sig_restorer ; sa_restorer
+dq 0 ; sa_mask
+
+str0: db "0123456789abcdef",0
+str1: db "0123456789abcdef",0
+
 section .text
 global _start
 
@@ -90,12 +120,9 @@ extern perror
 extern errno
 extern strtoul
 extern raise
-extern inet_ntoa
 extern free
 extern asprintf
-extern strdup
-extern strcmp
-extern putchar
+extern inet_ntoa
 
 ;;;;; int _start(int argc[rsp], char** argv[rsp+4 (to rsp+4+(8*argc))])
 _start:
@@ -112,23 +139,52 @@ call usage
 lea rax, [rsp+8]
 mov qword [argv], rax ; same for argv
 
-;; printf(intro_msg, argv[1])
+;; webroot_len = repne scasb until \0
 mov rbp, [argv]
-add rbp, 8
-mov rsi, [rbp]
-mov rdi, intro_msg
-call printf
+mov rdi, [rbp + 8]
+mov al, 0
+mov rcx, 4095
+mov rbx, rcx
+cld
+repne scasb
+sub rbx, rcx
+mov qword [webroot_len], rbx
 
-;; webroot = strdup(argv[1])
-mov rdi, [rbp]
-call strdup
+;; webroot = mmap(NULL, webroot_len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0)
+mov rax, SYS_MMAP
+mov rdi, 0
+mov qword rsi, [webroot_len]
+mov rdx, (PROT_READ | PROT_WRITE)
+mov r10, (MAP_ANONYMOUS | MAP_SHARED)
+mov r8, -1
+mov r9, 0
+syscall
 cmp rax, 0
-jne .strdup_ok
-mov rdi, 1
+jge .mmap_webroot_ok
+mov rdi, rax
 mov rax, SYS_EXIT
 syscall
-.strdup_ok:
+.mmap_webroot_ok:
 mov qword [webroot], rax
+
+;; strcpy(webroot, argv[1])
+mov rbp, [argv]
+mov rsi, [rbp + 8]
+mov qword rdi, [webroot]
+mov qword rcx, [webroot_len]
+rep movsb
+
+;; mprotect(webroot, webroot_len, PROT_READ)
+mov rax, SYS_MPROTECT
+mov qword rdi, [webroot]
+mov qword rsi, [webroot_len]
+mov rdx, PROT_READ
+syscall
+
+;; printf(intro_msg, argv[1])
+mov rdi, intro_msg
+mov qword rsi, [webroot]
+call printf
 
 ;; port = htons(strtoul(argv[2]))
 mov rbp, [argv]
@@ -157,9 +213,11 @@ mov word [port], ax
 ;; conn_loop()
 call conn_loop
 
-;; free(webroot)
+;; munmap(webroot, webroot_len)
+mov rax, SYS_MUNMAP
 mov qword rdi, [webroot]
-call free
+mov qword rsi, [webroot_len]
+syscall
 
 ;; exit(0)
 mov rdi, 0
@@ -275,6 +333,34 @@ mov rax, SYS_EXIT
 syscall
 .listen_ok:
 
+; set sigint handler to sigaction_sigint
+mov rax, SYS_RT_SIGACTION
+mov rdi, SIGINT
+mov rsi, sigaction_sigint
+mov rdx, 0
+mov r10, 8
+syscall
+cmp rax, 0
+je .sigint_ok
+mov rdi, rax
+mov rax, SYS_EXIT
+syscall
+.sigint_ok:
+
+; set sigchld handler to sigaction_sigchld
+mov rax, SYS_RT_SIGACTION
+mov rdi, SIGCHLD
+mov rsi, sigaction_sigchld
+mov rdx, 0
+mov r10, 8
+syscall
+cmp rax, 0
+je .sigchld_ok
+mov rdi, rax
+mov rax, SYS_EXIT
+syscall
+.sigchld_ok:
+
 ;; for(;;)
 .accept_loop:
 
@@ -309,10 +395,57 @@ call printf
 pop qword rsi
 
 ;; fork()
+.attempt_fork:
 mov rax, SYS_FORK
 syscall
 cmp rax, 0
 jne .fork_no_child
+
+;; setsockopt(cli_fd, SOL_SOCKET, SO_REUSEADDR, int32_one, 4)
+mov dword edi, [cli_fd]
+mov rsi, SOL_SOCKET
+mov rdx, SO_RCVTIMEO_NEW
+mov r10, rcvtimeo_timeval
+mov r8, 16
+mov rax, SYS_SETSOCKOPT
+syscall
+
+cmp rax, 0
+jge .no_setsockopt_rcvtimeo_fail
+mov rdi, rax
+mov rax, SYS_EXIT
+syscall
+ret
+.no_setsockopt_rcvtimeo_fail:
+
+;; change SIGINT handler
+mov rax, SYS_RT_SIGACTION
+mov rdi, SIGINT
+mov rsi, sigaction_sigint_child
+mov rdx, 0
+mov r10, 8
+syscall
+cmp rax, 0
+je .sigint_change_ok
+mov rdi, rax
+mov rax, SYS_EXIT
+syscall
+.sigint_change_ok:
+
+;; remove SIGCHLD handler
+mov rax, SYS_RT_SIGACTION
+mov rdi, SIGCHLD
+mov rsi, NULL
+mov rdx, NULL
+mov r10, 8
+syscall
+cmp rax, 0
+je .sigchld_remove_ok
+mov rdi, rax
+mov rax, SYS_EXIT
+syscall
+.sigchld_remove_ok:
+
 ;; child -> cli_fd should be valid
 call serv_child
 
@@ -322,6 +455,8 @@ syscall
 ret
 .fork_no_child:
 jg .fork_no_err
+cmp rax, -11
+je .attempt_fork
 mov rdi, perr_fork_msg
 mov rsi, rax
 push rsi
@@ -337,16 +472,6 @@ ret
 mov rax, SYS_CLOSE
 mov dword edi, [cli_fd]
 syscall
-
-.reap_children:
-mov rax, SYS_WAIT4
-mov rdi, -1
-mov rsi, reap_status
-mov rdx, 1 ; WNOHANG
-mov r10, 0 ; rusage = NULL
-syscall
-cmp rax, 0
-jg .reap_children
 
 jmp .accept_loop
 
@@ -431,6 +556,8 @@ mov qword rsi, [tcp_buf]
 mov rdx, TCP_BUF_SZ
 mov rax, SYS_READ
 syscall
+cmp rax, -EAGAIN ; if EAGAIN, then return 408 (request timeout)
+je .408
 cmp rax, 0
 jle .out
 cmp rax, 4095 ; request too long
@@ -457,11 +584,6 @@ lea rdi, [rdi + 4]
 call check_access
 cmp rax, 0
 jne .404 ; we can just pretend to 404 if the path is invalid
-
-; divine the mime type
-mov qword rdi, [tcp_buf]
-lea rdi, [rdi + 4]
-call populate_mime
 
 ;; getcwd - in prep for next step
 mov rax, SYS_GETCWD
@@ -518,14 +640,22 @@ mov rdi, access_log
 mov qword rsi, [page_name]
 call printf
 
-;; page_fd = open(fname, O_RDONLY, 0)
+; divine the mime type
+mov qword rdi, [page_name]
+call populate_mime
+
+;; page_fd = open(page_name, O_RDONLY, 0)
 mov rax, SYS_OPEN
 mov qword rdi, [page_name]
 mov rsi, O_RDONLY
 mov rdx, 0
 syscall
 cmp rax, 0
-jle .404
+jg .open_ok
+mov qword rdi, [page_name]
+call free
+jmp .404
+.open_ok:
 mov dword [page_fd], eax
 
 ;; free(page_name)
@@ -636,10 +766,6 @@ mov dword edi, [cli_fd]
 mov rax, SYS_CLOSE
 syscall
 
-;; free(webroot)
-mov qword rdi, [webroot]
-call free
-
 mov rdi, 0
 mov rax, SYS_EXIT
 syscall
@@ -659,6 +785,14 @@ jmp .out
 mov dword edi, [cli_fd]
 mov rsi, msg_404
 mov rdx, msg_404_len
+mov rax, SYS_WRITE
+syscall
+jmp .out
+
+.408:
+mov dword edi, [cli_fd]
+mov rsi, msg_408
+mov rdx, msg_408_len
 mov rax, SYS_WRITE
 syscall
 jmp .out
@@ -701,6 +835,36 @@ mov rax, 1
 ret
 .no_percent:
 
+cmp byte [rdi], '#'
+jne .no_hash
+mov rax, 1
+ret
+.no_hash:
+
+cmp byte [rdi], '&'
+jne .no_and
+mov rax, 1
+ret
+.no_and:
+
+cmp byte [rdi], '?'
+jne .no_question
+mov rax, 1
+ret
+.no_question:
+
+cmp byte [rdi], ';'
+jne .no_semicolon
+mov rax, 1
+ret
+.no_semicolon:
+
+cmp byte [rdi], '\'
+jne .no_backslash
+mov rax, 1
+ret
+.no_backslash:
+
 cmp byte [rdi], 0x20
 jge .lower_bound_ok
 mov rax, 1
@@ -722,7 +886,6 @@ ret
 
 ;; rdi = access path
 populate_mime:
-
 mov rcx, 4095
 mov al, 0
 mov rbp, rdi
@@ -730,6 +893,16 @@ repne scasb
 dec rdi ; rdi is now end char
 mov rcx, rdi
 sub rcx, rbp ; string length!
+cmp rcx, 1
+jg .str_len_ok
+mov rax, mime_html
+mov qword [mime_type], rax
+.str_len_ok:
+cmp byte [rbp], '.'
+jne .first_char_not_dot
+inc rbp
+dec rcx
+.first_char_not_dot:
 mov al, '.'
 mov rdi, rbp
 repne scasb
@@ -745,7 +918,7 @@ mov rbp, rdi
 ; i'm a lazy bum!
 mov rdi, rbp
 mov rsi, extn_html0
-call strcmp
+call _strcmp
 cmp rax, 0
 jne .not_html0
 mov rax, mime_html
@@ -756,7 +929,7 @@ ret
 
 mov rdi, rbp
 mov rsi, extn_html1
-call strcmp
+call _strcmp
 cmp rax, 0
 jne .not_html1
 mov rax, mime_html
@@ -767,7 +940,7 @@ ret
 
 mov rdi, rbp
 mov rsi, extn_css
-call strcmp
+call _strcmp
 cmp rax, 0
 jne .not_css
 mov rax, mime_css
@@ -778,7 +951,7 @@ ret
 
 mov rdi, rbp
 mov rsi, extn_jpeg0
-call strcmp
+call _strcmp
 cmp rax, 0
 jne .not_jpeg0
 mov rax, mime_jpeg
@@ -789,7 +962,7 @@ ret
 
 mov rdi, rbp
 mov rsi, extn_jpeg1
-call strcmp
+call _strcmp
 cmp rax, 0
 jne .not_jpeg1
 mov rax, mime_jpeg
@@ -800,7 +973,7 @@ ret
 
 mov rdi, rbp
 mov rsi, extn_js
-call strcmp
+call _strcmp
 cmp rax, 0
 jne .not_js
 mov rax, mime_js
@@ -811,7 +984,7 @@ ret
 
 mov rdi, rbp
 mov rsi, extn_png
-call strcmp
+call _strcmp
 cmp rax, 0
 jne .not_png
 mov rax, mime_png
@@ -822,7 +995,7 @@ ret
 
 mov rdi, rbp
 mov rsi, extn_ico
-call strcmp
+call _strcmp
 cmp rax, 0
 jne .not_icon
 mov rax, mime_icon
@@ -834,4 +1007,133 @@ ret
 mov rax, mime_plain
 mov qword [mime_type], rax
 mov byte [rbp - 1], '.'
+ret
+
+;; void sigint_hdlr(int)
+sigint_hdlr:
+
+and rsp, -16 ; align stack
+
+mov rdi, sigint_msg
+call printf
+
+;; close(sock_fd)
+mov rax, SYS_CLOSE
+mov dword edi, [sock_fd]
+syscall
+
+;; munmap(webroot, webroot_len)
+mov rax, SYS_MUNMAP
+mov qword rdi, [webroot]
+mov qword rsi, [webroot_len]
+syscall
+
+;; get pid and kill all children
+mov rax, SYS_GETPID
+syscall
+
+mov rdi, rax
+mov rax, SYS_GETPGID
+syscall
+
+neg rax
+mov rdi, rax
+mov rax, SYS_KILL
+mov rsi, SIGINT
+syscall
+
+.reap_children:
+mov rax, SYS_WAIT4
+mov rdi, -1
+mov rsi, reap_status
+mov rdx, 0 ; no flags, wait for state change
+mov r10, 0 ; rusage = NULL
+syscall
+cmp rax, 0
+jg .reap_children
+
+;; exit(0)
+mov rax, SYS_EXIT
+mov rdi, 0
+syscall
+
+ret
+
+;; void sigchld_hdlr(int)
+sigchld_hdlr:
+
+.reap_children:
+mov rax, SYS_WAIT4
+mov rdi, -1
+mov rsi, reap_status
+mov rdx, WNOHANG
+mov r10, 0 ; rusage = NULL
+syscall
+cmp rax, 0
+jg .reap_children
+
+ret
+
+;; void sigint_child_hdlr(int)
+sigint_child_hdlr:
+
+; close(cli_fd)
+mov rax, SYS_CLOSE
+mov dword edi, [cli_fd]
+syscall
+
+; exit(0)
+mov rax, SYS_EXIT
+mov rdi, 0
+syscall
+
+ret
+
+sig_restorer:
+mov rax, SYS_RT_SIGRETURN
+syscall
+ret
+
+; strcmp
+_strcmp:
+
+push rbx
+push rdi
+push rsi
+
+mov rcx, 65535
+mov al, 0
+mov rbx, rcx
+repne scasb
+sub rbx, rcx
+mov rdx, rbx
+
+mov rdi, rsi
+mov rcx, 65535
+mov al, 0
+mov rbx, rcx
+repne scasb
+sub rbx, rcx
+
+cmp rbx, rdx
+jc .first_bigger
+mov rax, rdx
+jmp .sz_chk_end
+.first_bigger:
+mov rax, rbx
+.sz_chk_end:
+
+pop rdi
+pop rsi
+
+mov rcx, rax
+repe cmpsb
+jne .differ
+mov rax, 0
+pop rbx
+
+ret
+.differ:
+pop rbx
+mov rax, 1
 ret
