@@ -679,6 +679,8 @@ mov rsi, 0
 mov rdx, SEEK_END
 syscall
 mov qword [page_len], rax
+cmp rax, 0
+je .page_zero_len_0
 
 ;; lseek(page_fd, 0, SEEK_SET)
 mov rax, SYS_LSEEK
@@ -713,6 +715,8 @@ syscall
 cmp qword rax, [page_len]
 jne .404
 
+.page_zero_len_0:
+
 ;; hdr_len = asprintf(&hdr_buf, hdr_fmt, mime_type, page_len)
 mov qword rdi, hdr_buf
 mov qword rsi, hdr_fmt
@@ -736,6 +740,10 @@ jne .500
 mov qword rdi, [hdr_buf]
 call free
 
+mov qword rax, [page_len]
+cmp rax, 0
+je .page_zero_len_1
+
 ;; write(cli_fd, page_buf, page_len)
 mov rax, SYS_WRITE
 mov dword edi, [cli_fd]
@@ -750,6 +758,8 @@ mov rax, SYS_MUNMAP
 mov qword rdi, [page_buf]
 mov qword rsi, [page_len]
 syscall
+
+.page_zero_len_1:
 
 ;; close(page_fd)
 mov rax, SYS_CLOSE
@@ -1064,7 +1074,7 @@ pop rbx
 mov rax, 1
 ret
 
-extern strcmp ; todo: use my own!
+extern strcasecmp ; todo: use my own!
 ;; void derive_mime(char* extn)
 derive_mime:
 mov qword [file_extn], rdi
@@ -1133,7 +1143,7 @@ mov qword rdi, [file_extn]
 
 push rcx
 push rdx
-call strcmp ; -ve if before, +ve if after
+call strcasecmp ; -ve if before, +ve if after
 pop rdx
 pop rcx
 pop rsi
