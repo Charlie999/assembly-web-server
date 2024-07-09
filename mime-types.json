@@ -751,6 +751,7 @@
 	"wmv"			: "video/x-ms-wmv",
 	"wmx"			: "video/x-ms-wmx",
 	"wmz"			: "application/x-ms-wmz",
+	"woff2"			: "font/woff2",
 	"wpd"			: "application/vnd.wordperfect",
 	"wpl"			: "application/vnd.ms-wpl",
 	"wps"			: "application/vnd.ms-works",
