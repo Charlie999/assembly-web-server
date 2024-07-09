@@ -44,6 +44,8 @@ access_log: db "access [%s]",0xa,0
 rsp_debug: db "rsp = 0x%016lX",0xa,0
 int32_one: dd 1
 sigint_msg: db "SIGINT caught, exiting",0xa,0
+inval_mime_types_file_msg: db "Invalid compiled-in mime-types.bin",0xa,0
+mime_types_file_info_msg: db "mime-types.bin: %s",0xa,0
 
 msg_bad_req: db "HTTP/1.1 400 Bad request",0xd,0xa,"Connection: close",0xd,0xa,"Content-Type: text/plain",0xd,0xa,"Server: ",SERVER_BRAND,0xd,0xa,"Content-Length: 12",0xd,0xa,0xd,0xa,"Bad request",0xa
 msg_bad_req_end:
@@ -63,15 +65,6 @@ msg_500_end:
 
 hdr_fmt: db "HTTP/1.1 200 OK",0xd,0xa,"Connection: close",0xd,0xa,"Content-Type: %s",0xd,0xa,"Server: ",SERVER_BRAND,0xd,0xa,"Content-Length: %lu",0xd,0xa,0xd,0xa,0
 page_name_fmt: db "./%s%s",0
-
-; hardcoded! yay!
-mime_html: db "text/html",0
-mime_js: db "text/javascript",0
-mime_css: db "text/css",0
-mime_jpeg: db "image/jpeg",0
-mime_png: db "image/png",0
-mime_plain: db "text/plain",0
-mime_icon: db "image/x-icon",0
 
 extn_html0: db "html",0
 extn_html1: db "htm",0
@@ -107,8 +100,11 @@ dq (SA_RESTORER | SA_RESTART) ; sa_flags
 dq sig_restorer ; sa_restorer
 dq 0 ; sa_mask
 
-str0: db "0123456789abcdef",0
-str1: db "0123456789abcdef",0
+str0: db "dump",0
+que: db "final mime type chosen: [%s]",0xa,0
+
+section .mime-table alloc progbits align=4 
+mime_tables: incbin "mime-types.bin"
 
 section .text
 global _start
@@ -126,6 +122,20 @@ extern inet_ntoa
 
 ;;;;; int _start(int argc[rsp], char** argv[rsp+4 (to rsp+4+(8*argc))])
 _start:
+mov dword eax, [mime_tables]
+cmp eax, 1
+je .mime_ver_ok
+mov rdi, inval_mime_types_file_msg
+call printf
+mov rax, SYS_EXIT
+syscall
+.mime_ver_ok:
+
+mov rdi, mime_types_file_info_msg
+mov dword esi, [mime_tables + 16]
+lea esi, [esi + mime_tables]
+call printf
+
 mov eax, [rsp]
 mov dword [argc], eax ; set up argc
 
@@ -895,8 +905,11 @@ mov rcx, rdi
 sub rcx, rbp ; string length!
 cmp rcx, 1
 jg .str_len_ok
-mov rax, mime_html
+xor eax, eax
+mov dword eax, [mime_tables + 12]
+lea rax, [rax + mime_tables]
 mov qword [mime_type], rax
+ret
 .str_len_ok:
 cmp byte [rbp], '.'
 jne .first_char_not_dot
@@ -908,104 +921,17 @@ mov rdi, rbp
 repne scasb
 cmp rcx, 0
 jne .extn_found
-mov rax, mime_plain
+xor eax, eax
+mov dword eax, [mime_tables + 12]
+lea rax, [rax + mime_tables]
 mov qword [mime_type], rax
 ret
 .extn_found:
 mov byte [rdi - 1], 0 ; remove dot, rdi is now extension!
 mov rbp, rdi
-
-; i'm a lazy bum!
-mov rdi, rbp
-mov rsi, extn_html0
-call _strcmp
-cmp rax, 0
-jne .not_html0
-mov rax, mime_html
-mov qword [mime_type], rax
-mov byte [rbp - 1], '.'
-ret
-.not_html0:
-
-mov rdi, rbp
-mov rsi, extn_html1
-call _strcmp
-cmp rax, 0
-jne .not_html1
-mov rax, mime_html
-mov qword [mime_type], rax
-mov byte [rbp - 1], '.'
-ret
-.not_html1:
-
-mov rdi, rbp
-mov rsi, extn_css
-call _strcmp
-cmp rax, 0
-jne .not_css
-mov rax, mime_css
-mov qword [mime_type], rax
-mov byte [rbp - 1], '.'
-ret
-.not_css:
-
-mov rdi, rbp
-mov rsi, extn_jpeg0
-call _strcmp
-cmp rax, 0
-jne .not_jpeg0
-mov rax, mime_jpeg
-mov qword [mime_type], rax
-mov byte [rbp - 1], '.'
-ret
-.not_jpeg0:
-
-mov rdi, rbp
-mov rsi, extn_jpeg1
-call _strcmp
-cmp rax, 0
-jne .not_jpeg1
-mov rax, mime_jpeg
-mov qword [mime_type], rax
-mov byte [rbp - 1], '.'
-ret
-.not_jpeg1:
-
-mov rdi, rbp
-mov rsi, extn_js
-call _strcmp
-cmp rax, 0
-jne .not_js
-mov rax, mime_js
-mov qword [mime_type], rax
-mov byte [rbp - 1], '.'
-ret
-.not_js:
-
-mov rdi, rbp
-mov rsi, extn_png
-call _strcmp
-cmp rax, 0
-jne .not_png
-mov rax, mime_png
-mov qword [mime_type], rax
-mov byte [rbp - 1], '.'
-ret
-.not_png:
-
-mov rdi, rbp
-mov rsi, extn_ico
-call _strcmp
-cmp rax, 0
-jne .not_icon
-mov rax, mime_icon
-mov qword [mime_type], rax
-mov byte [rbp - 1], '.'
-ret
-.not_icon:
-
-mov rax, mime_plain
-mov qword [mime_type], rax
+push rbp
+call derive_mime
+pop rbp
 mov byte [rbp - 1], '.'
 ret
 
@@ -1137,3 +1063,129 @@ ret
 pop rbx
 mov rax, 1
 ret
+
+extern strcmp ; todo: use my own!
+;; void derive_mime(char* extn)
+derive_mime:
+mov qword [file_extn], rdi
+
+push rdi
+mov rcx, 4095
+mov al, 0
+mov rdx, rcx
+cld
+repne scasb
+pop rdi
+sub rdx, rcx
+dec rdx
+
+mov rbp, mime_tables
+mov dword eax, [rbp + 12] ; dfl_str_ptr
+lea rax, [rax + rbp]
+xor r8, r8
+mov r8, rax
+
+mov qword [dfl_type], r8
+
+mov dword eax, [rbp + 4] ; min_bin
+mov dword ecx, [rbp + 8] ; max_bin
+
+cmp dword edx, eax 
+jge .lower_bound_ok
+mov qword [mime_type], r8
+ret
+.lower_bound_ok:
+
+cmp dword edx, ecx
+jle .upper_bound_ok
+mov qword [mime_type], r8
+ret
+.upper_bound_ok:
+
+sub rdx, rax 
+lea rax, [20 + mime_tables + (4*rdx)]
+mov dword eax, [rax]
+mov r10, 0xffffffff
+and qword rax, r10
+mov qword [mime_search_list_ptr], rax
+xor rdx, rdx
+mov dword edx, [rax + mime_tables] ; edx is now total len -> initial UPPER bound
+cmp edx, 0
+je .no_type_found
+cmp edx, 1
+jne .not_one
+dec edx
+.not_one:
+mov rcx, 0 ; initial LOWER bound
+
+.search_loop:
+mov rsi, rdx
+sub rsi, rcx
+shr rsi, 1
+add rsi, rcx
+
+push rsi
+mov qword rax, [mime_search_list_ptr]
+lea rdi, [rax + mime_tables + 4 + (rsi*8)]
+mov dword edi, [rdi]
+lea esi, [edi + mime_tables]
+mov qword rdi, [file_extn]
+
+push rcx
+push rdx
+call strcmp ; -ve if before, +ve if after
+pop rdx
+pop rcx
+pop rsi
+
+mov dword [last_strcmp], eax
+
+cmp eax, 0
+jz .loop_escape
+
+cmp rcx, rdx
+je .loop_escape
+
+cmp rcx, rsi
+jne .no_force_odd
+mov rcx, rdx ; set lower bound to upper bound to force an odd compare
+jmp .search_loop
+.no_force_odd:
+
+cmp eax, 0
+jl .not_after
+; str is located after midpoint, therefore set lower bound to current midpoint
+mov rcx, rsi
+jmp .search_loop
+.not_after:
+jg .not_before
+; str is located before midpoint, therefore set upper bound to current midpoint
+mov rdx, rsi
+jmp .search_loop
+.not_before:
+
+.loop_escape:
+
+mov dword eax, [last_strcmp]
+cmp eax, 0
+jne .no_type_found
+
+mov qword rax, [mime_search_list_ptr]
+lea rdi, [rax + mime_tables + 8 + (rsi*8)]
+mov dword edi, [rdi]
+lea rdi, [edi + mime_tables]
+mov qword [mime_type], rdi
+
+ret
+
+.no_type_found:
+mov qword r8, [dfl_type]
+mov qword [mime_type], r8
+ret
+
+;;
+section .bss alloc write
+file_extn: resq 1
+mime_search_list_ptr: resq 1
+last_strcmp: resd 1
+dfl_type: resq 1
