@@ -100,9 +100,6 @@ dq (SA_RESTORER | SA_RESTART) ; sa_flags
 dq sig_restorer ; sa_restorer
 dq 0 ; sa_mask
 
-str0: db "dump",0
-que: db "final mime type chosen: [%s]",0xa,0
-
 section .mime-table alloc progbits align=4 
 mime_tables: incbin "mime-types.bin"
 
@@ -588,6 +585,18 @@ mov qword rcx, [recv_len]
 repne scasb
 mov byte [rdi - 1], 0
 
+; remove query string
+mov qword rdi, [tcp_buf]
+lea rdi, [rdi + 4]
+mov rcx, rax
+mov al, '?'
+cld
+repne scasb
+cmp rcx, 0
+je .rem_query_str_rcx_zero
+mov byte [rdi - 1], 0
+.rem_query_str_rcx_zero:
+
 ; check path
 mov qword rdi, [tcp_buf]
 lea rdi, [rdi + 4]
@@ -906,6 +915,7 @@ ret
 
 ;; rdi = access path
 populate_mime:
+
 mov rcx, 4095
 mov al, 0
 mov rbp, rdi
@@ -927,10 +937,16 @@ inc rbp
 dec rcx
 .first_char_not_dot:
 mov al, '.'
-mov rdi, rbp
+lea rdi, [rbp + rcx]
+std
 repne scasb
-cmp rcx, 0
-jne .extn_found
+cld
+inc rcx
+inc rcx
+lea rdi, [rbp + rcx]
+
+cmp rcx, 2
+jg .extn_found
 xor eax, eax
 mov dword eax, [mime_tables + 12]
 lea rax, [rax + mime_tables]
