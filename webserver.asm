@@ -51,6 +51,14 @@ msg_bad_req: db "HTTP/1.1 400 Bad request",0xd,0xa,"Connection: close",0xd,0xa,"
 msg_bad_req_end:
 %define msg_bad_req_len (msg_bad_req_end - msg_bad_req) 
 
+msg_bad_meth: db "HTTP/1.1 405 Method Not Allowed",0xd,0xa,"Connection: close",0xd,0xa,"Content-Type: text/plain",0xd,0xa,"Server: ",SERVER_BRAND,0xd,0xa,"Content-Length: 19",0xd,0xa,0xd,0xa,"Method Not Allowed",0xa
+msg_bad_meth_end:
+%define msg_bad_meth_len (msg_bad_meth_end - msg_bad_meth) 
+
+msg_large_payload: db "HTTP/1.1 413 Payload Too Large",0xd,0xa,"Connection: close",0xd,0xa,"Content-Type: text/plain",0xd,0xa,"Server: ",SERVER_BRAND,0xd,0xa,"Content-Length: 18",0xd,0xa,0xd,0xa,"Payload Too Large",0xa
+msg_large_payload_end:
+%define msg_large_payload_len (msg_large_payload_end - msg_large_payload) 
+
 msg_404: db "HTTP/1.1 404 Not Found",0xd,0xa,"Connection: close",0xd,0xa,"Content-Type: text/plain",0xd,0xa,"Server: ",SERVER_BRAND,0xd,0xa,"Content-Length: 10",0xd,0xa,0xd,0xa,"Not Found",0xa
 msg_404_end:
 %define msg_404_len (msg_404_end - msg_404) 
@@ -81,6 +89,10 @@ double_dot: db '..',0
 
 rcvtimeo_timeval: dq 10 ; tv_sec
                   dq 0  ; tv_usec
+
+method_get: db "GET",0
+method_post: db "POST",0
+method_head: db "HEAD",0
 
 sigaction_sigint:
 dq sigint_hdlr ; sa_handler
@@ -506,7 +518,7 @@ pop rbp
 mov rax, 0
 ret
 
-%define TCP_BUF_SZ 4096
+%define TCP_BUF_SZ 65536
 
 ;;
 serv_child:
@@ -567,27 +579,70 @@ cmp rax, -EAGAIN ; if EAGAIN, then return 408 (request timeout)
 je .408
 cmp rax, 0
 jle .out
-cmp rax, 4095 ; request too long
-jge .bad_req
+cmp rax, (TCP_BUF_SZ - 1) ; request too long
+jge .payload_too_large
 
 mov qword [recv_len], rax
 
-mov qword rbp, [tcp_buf]
-mov dword eax, [rbp]
-mov dword ebx, 'GET '
-cmp dword eax, ebx
-jne .bad_req
+
+; get total request length
+mov qword rdi, [tcp_buf]
+mov al, 0
+mov rcx, TCP_BUF_SZ
+mov rdx, rcx
+repne scasb
+sub rdx, rcx
+
+; extract the method, we allow GET/POST
+mov qword [no_send_body], 0
+
+mov qword rdi, [tcp_buf]
+mov al, ' '
+mov rcx, rdx
+mov rdx, rcx
+repne scasb
+sub rdx, rcx
+mov qword [meth_len], rdx
+mov byte [rdi - 1], 0
+
+mov qword rdi, [tcp_buf]
+mov rsi, method_get
+call _strcmp
+cmp rax, 0
+je .method_ok
+
+mov qword rdi, [tcp_buf]
+mov rsi, method_post
+call _strcmp
+cmp rax, 0
+je .method_ok
+
+mov qword rdi, [tcp_buf]
+mov rsi, method_head
+call _strcmp
+cmp rax, 0
+jne .meth_not_head
+mov qword [no_send_body], 1
+jmp .method_ok
+.meth_not_head
+
+jmp .meth_not_allowed
+.method_ok:
+
+;;;
 
 mov al, ' '
 mov qword rdi, [tcp_buf]
-lea rdi, [rdi + 4]
+mov qword rcx, [meth_len]
+lea rdi, [rdi + rcx]
 mov qword rcx, [recv_len]
 repne scasb
 mov byte [rdi - 1], 0
 
 ; remove query string
 mov qword rdi, [tcp_buf]
-lea rdi, [rdi + 4]
+mov qword rcx, [meth_len]
+lea rdi, [rdi + rcx]
 mov rcx, rax
 mov al, '?'
 cld
@@ -599,7 +654,8 @@ mov byte [rdi - 1], 0
 
 ; check path
 mov qword rdi, [tcp_buf]
-lea rdi, [rdi + 4]
+mov qword rcx, [meth_len]
+lea rdi, [rdi + rcx]
 call check_access
 cmp rax, 0
 jne .404 ; we can just pretend to 404 if the path is invalid
@@ -620,7 +676,8 @@ syscall
 
 ;; asprintf(page_name, "./%s%s", access, index_addl)
 mov qword rdi, [tcp_buf]
-lea rdx, [rdi + 4]
+mov qword rcx, [meth_len]
+lea rdx, [rdi + rcx]
 mov rdi, page_name
 mov rsi, page_name_fmt
 mov qword rcx, [index_addl]
@@ -753,6 +810,10 @@ mov qword rax, [page_len]
 cmp rax, 0
 je .page_zero_len_1
 
+mov qword rax, [no_send_body]
+cmp rax, 1
+je .no_send_body
+
 ;; write(cli_fd, page_buf, page_len)
 mov rax, SYS_WRITE
 mov dword edi, [cli_fd]
@@ -761,6 +822,8 @@ mov qword rdx, [page_len]
 syscall
 cmp qword rax, [page_len]
 jne .500
+
+.no_send_body:
 
 ;; munmap(page_buf, page_len)
 mov rax, SYS_MUNMAP
@@ -806,6 +869,22 @@ ret
 mov dword edi, [cli_fd]
 mov rsi, msg_bad_req
 mov rdx, msg_bad_req_len 
+mov rax, SYS_WRITE
+syscall
+jmp .out
+
+.meth_not_allowed:
+mov dword edi, [cli_fd]
+mov rsi, msg_bad_meth
+mov rdx, msg_bad_meth_len 
+mov rax, SYS_WRITE
+syscall
+jmp .out
+
+.payload_too_large:
+mov dword edi, [cli_fd]
+mov rsi, msg_large_payload
+mov rdx, msg_large_payload_len 
 mov rax, SYS_WRITE
 syscall
 jmp .out
@@ -1214,4 +1293,7 @@ section .bss alloc write
 file_extn: resq 1
 mime_search_list_ptr: resq 1
 last_strcmp: resd 1
+resd 1
 dfl_type: resq 1
+meth_len: resq 1
+no_send_body: resq 1
