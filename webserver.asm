@@ -519,6 +519,7 @@ mov rax, 0
 ret
 
 %define TCP_BUF_SZ 65536
+%define TX_MAX_BLOCK_SZ 1048576
 
 ;;
 serv_child:
@@ -755,13 +756,15 @@ mov rsi, 0
 mov rdx, SEEK_SET
 syscall
 
-;; page_buf = mmap(NULL, page_len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0)
+;; page_buf = mmap(NULL, page_len, PROT_READ, MAP_PRIVATE, page_fd, 0)
 mov rdi, NULL
 mov qword rsi, [page_len]
-mov rdx, (PROT_READ | PROT_WRITE)
-mov r10, (MAP_ANONYMOUS | MAP_PRIVATE)
-mov r8 , -1
-mov r9,  0
+mov rdx, (PROT_READ)
+mov r10, (MAP_PRIVATE)
+mov r9 , 0
+xor rax, rax
+mov dword eax, [page_fd]
+mov r8,  rax
 mov rax, SYS_MMAP
 syscall
 mov qword [page_buf], rax
@@ -772,16 +775,13 @@ mov rax, SYS_EXIT
 syscall
 .mmap_third_ok:
 
-;; read(page_fd, page_buf, page_len)
-mov rax, SYS_READ
-mov dword edi, [page_fd]
-mov qword rsi, [page_buf]
-mov qword rdx, [page_len]
-syscall
-cmp qword rax, [page_len]
-jne .404
-
 .page_zero_len_0:
+
+;; close(page_fd)
+mov rax, SYS_CLOSE
+mov dword edi, [page_fd]
+syscall
+
 
 ;; hdr_len = asprintf(&hdr_buf, hdr_fmt, mime_type, page_len)
 mov qword rdi, hdr_buf
@@ -814,14 +814,30 @@ mov qword rax, [no_send_body]
 cmp rax, 1
 je .no_send_body
 
+mov r10, 0 ; write progress
+
+.write_loop:
 ;; write(cli_fd, page_buf, page_len)
 mov rax, SYS_WRITE
 mov dword edi, [cli_fd]
 mov qword rsi, [page_buf]
+lea rsi, [rsi + r10]
 mov qword rdx, [page_len]
+sub rdx, r10
+cmp rdx, TX_MAX_BLOCK_SZ
+jle .block_smaller
+mov rdx, TX_MAX_BLOCK_SZ
+.block_smaller:
+push r10
+push rdx
 syscall
-cmp qword rax, [page_len]
+pop rdx
+pop r10
+add r10, rax
+cmp qword rax, rdx
 jne .500
+cmp qword [page_len], r10
+jne .write_loop
 
 .no_send_body:
 
@@ -832,11 +848,6 @@ mov qword rsi, [page_len]
 syscall
 
 .page_zero_len_1:
-
-;; close(page_fd)
-mov rax, SYS_CLOSE
-mov dword edi, [page_fd]
-syscall
 
 ; nope, we are HTTP 1.0! jmp .loop
 .out:
