@@ -1,5 +1,6 @@
 #!/bin/bash
 
+./generate_mime_json.py
 ./generate_mime_tables.py
 
 nasm -felf64 -g webserver.asm
