@@ -625,7 +625,7 @@ cmp rax, 0
 jne .meth_not_head
 mov qword [no_send_body], 1
 jmp .method_ok
-.meth_not_head
+.meth_not_head:
 
 jmp .meth_not_allowed
 .method_ok:
